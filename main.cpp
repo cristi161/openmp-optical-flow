@@ -2,11 +2,13 @@
 #include <string>
 #include <omp.h>
 #include <opencv2/opencv.hpp>
+#include <chrono>
 
 #include "config.h"
 
 using namespace std;
 using namespace cv;
+using namespace std::chrono;
 
 float sqrt_(float n)
 {
@@ -39,7 +41,7 @@ Mat compute_optical_flow(const Mat& frame1, const Mat& frame2, int window_size, 
     int cn = frame1.channels();
     Scalar_<uint8_t> bgrPixel;
 
-    {
+#pragma omp parallel for default(none) shared(height, width, window_size, step, frame1, frame2, out) private(Ix, Iy, It) collapse(2) num_threads(omp_get_max_threads())
     for (int l = window_size - 1; l < height - window_size - 1; l += step) {
         for (int k = window_size - 1; k < width - window_size - 1; k += step) {
             // Compute derivatives in x, y and time directions
@@ -71,11 +73,11 @@ Mat compute_optical_flow(const Mat& frame1, const Mat& frame2, int window_size, 
             }
         } // for loop cols
     } // for loop rows
-    } // pragma omp parallel
+
     return out;
 }
 
-void optical_flow(string path)
+void optical_flow(const string& path)
 {
     Mat prev_frame;
     Mat current_frame;
@@ -89,7 +91,7 @@ void optical_flow(string path)
         return;
     }
 
-    while(1){
+    while(true){
         cap >> current_frame;
 
         if (current_frame.empty())
@@ -105,7 +107,7 @@ void optical_flow(string path)
 
             Mat out = compute_optical_flow(grayscale1, grayscale2, 2, 1);
 
-            imwrite(R"(C:\)" + to_string(count) + ".jpg", out);
+            imwrite(R"(C:\output)" + to_string(count) + ".jpg", out);
             count++;
         }
 
@@ -123,7 +125,16 @@ void optical_flow(string path)
 
 int main() {
 
+    if (omp_get_max_threads() == 0) {
+        return -1;
+    }
+
+    auto start = high_resolution_clock::now();
     optical_flow(VIDEO_FILENAME);
+    auto stop = high_resolution_clock::now();
+    auto duration = duration_cast<microseconds>(stop - start);
+
+    cout << "Computation time: " << duration.count() << " microseconds" << endl;
 
     return 0;
 }
