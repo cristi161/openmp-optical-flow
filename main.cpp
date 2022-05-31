@@ -10,6 +10,17 @@ using namespace std;
 using namespace cv;
 using namespace std::chrono;
 
+struct Features
+{
+    Point featureArray[MAX_FEATURES][2];
+    int size;
+
+    Features() : size(0)
+    {
+        memset(&featureArray, 0, sizeof(featureArray));
+    }
+};
+
 float sqrt_(float n)
 {
     float x = n;
@@ -22,9 +33,8 @@ float sqrt_(float n)
     return x;
 }
 
-Mat compute_optical_flow(const Mat& frame1, const Mat& frame2, int window_size, int step)
+Features compute_optical_flow(const Mat& frame1, const Mat& frame2, int window_size, int step)
 {
-
     assert(window_size > 0);
     assert(step > 0);
 
@@ -36,12 +46,12 @@ Mat compute_optical_flow(const Mat& frame1, const Mat& frame2, int window_size, 
 
     Mat out = frame1.clone();
 
-    uint8_t* pixelPtr = (uint8_t*)frame1.data;
     double Ix = 1, Iy = 1, It = 1;
-    int cn = frame1.channels();
     Scalar_<uint8_t> bgrPixel;
 
-#pragma omp parallel for default(none) shared(height, width, window_size, step, frame1, frame2, out) private(Ix, Iy, It) collapse(2) num_threads(omp_get_max_threads())
+    Features features;
+
+#pragma omp parallel for default(none) shared(height, width, window_size, step, frame1, frame2, out, features) private(Ix, Iy, It) collapse(2) num_threads(omp_get_max_threads())
     for (int l = window_size - 1; l < height - window_size - 1; l += step) {
         for (int k = window_size - 1; k < width - window_size - 1; k += step) {
             // Compute derivatives in x, y and time directions
@@ -68,17 +78,33 @@ Mat compute_optical_flow(const Mat& frame1, const Mat& frame2, int window_size, 
                 {
                     Point pt1((int)(k + Un[1]), (int)(l + Un[0]));
                     Point pt2(k, l);
-                    arrowedLine(out, pt1, pt2, Scalar_<double>(0.2, 0.4, 0.7));
+                    if (features.size < MAX_FEATURES - 1) {
+#pragma omp critical
+                        {
+                            features.featureArray[features.size][0] = pt1;
+                            features.featureArray[features.size][1] = pt2;
+                            features.size++;
+                        }
+                        //arrowedLine(out, pt1, pt2, Scalar_<double>(0.2, 0.4, 0.7));
+                    }
                 }
             }
         } // for loop cols
     } // for loop rows
 
-    return out;
+    return features;
 }
 
 void optical_flow(const string& path)
 {
+    int frame_width =320;
+    int frame_height = 240;
+    Size frame_size(frame_width, frame_height);
+    int fps = 10;
+
+    VideoWriter output(R"(C:\output.avi)",
+                       VideoWriter::fourcc('M', 'J', 'P', 'G'),fps, frame_size, false);
+
     Mat prev_frame;
     Mat current_frame;
 
@@ -90,6 +116,9 @@ void optical_flow(const string& path)
         cout << "Error opening video stream or file" << endl;
         return;
     }
+
+    microseconds totalTime;
+    memset(&totalTime, 0, sizeof(totalTime));
 
     while(true){
         cap >> current_frame;
@@ -105,9 +134,43 @@ void optical_flow(const string& path)
             cvtColor(prev_frame, grayscale1, COLOR_BGR2GRAY);
             cvtColor(current_frame, grayscale2, COLOR_BGR2GRAY);
 
-            Mat out = compute_optical_flow(grayscale1, grayscale2, 2, 1);
+            Mat prev_frame_P2;
+            Mat current_frame_P2;
 
-            imwrite(R"(C:\output)" + to_string(count) + ".jpg", out);
+            pyrDown(grayscale1,prev_frame_P2,Size(prev_frame.size().width/2, prev_frame.size().height/2));
+            pyrDown(grayscale2,current_frame_P2,Size(prev_frame.size().width/2, prev_frame.size().height/2));
+
+            Features p0_features, p2_features;
+
+            auto start = high_resolution_clock::now();
+#pragma omp parallel default(none) shared(grayscale1, grayscale2, p0_features, p2_features, prev_frame_P2, current_frame_P2) num_threads(2)
+            {
+#pragma omp sections
+            {
+#pragma omp section
+            {
+                p0_features = compute_optical_flow(grayscale1, grayscale2, 2, 1);
+            }
+#pragma omp section
+            {
+                p2_features = compute_optical_flow(prev_frame_P2, current_frame_P2, 2, 1);
+            }
+            }
+            }
+            auto stop = high_resolution_clock::now();
+            totalTime += duration_cast<microseconds>(stop - start);
+
+            for (int i = 0; i < p0_features.size; ++i) {
+                arrowedLine(grayscale2, p0_features.featureArray[i][0], p0_features.featureArray[i][1], Scalar_<double>(0.2, 0.4, 0.7));
+            }
+
+            for (int i = 0; i < p2_features.size; ++i) {
+                arrowedLine(grayscale2, p2_features.featureArray[i][0] * 2, p2_features.featureArray[i][1] * 2, Scalar_<double>(0.2, 0.4, 0.7));
+            }
+
+            //output.write(out);
+
+            imwrite(R"(C:\output\img_)" + to_string(count) + ".jpg", grayscale2);
             count++;
         }
 
@@ -119,7 +182,10 @@ void optical_flow(const string& path)
             break;
     }
 
+    cout << "Computation time: " << totalTime.count() << " microseconds" << endl;
+
     cap.release();
+    output.release();
     destroyAllWindows();
 }
 
@@ -129,12 +195,7 @@ int main() {
         return -1;
     }
 
-    auto start = high_resolution_clock::now();
     optical_flow(VIDEO_FILENAME);
-    auto stop = high_resolution_clock::now();
-    auto duration = duration_cast<microseconds>(stop - start);
-
-    cout << "Computation time: " << duration.count() << " microseconds" << endl;
 
     return 0;
 }
